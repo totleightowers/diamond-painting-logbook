@@ -826,7 +826,8 @@ const GAPS = [
     has: (p) => p.status !== 'wishlist' && !p.date_ordered && !p.date_received },
   { k: 'price', label: 'No price', has: (p) => p.status !== 'wishlist' && p.price == null },
   { k: 'drills', label: 'No diamond count', has: (p) => !p.drills },
-  { k: 'size', label: 'No canvas size', has: (p) => !p.width_in || !p.height_in }
+  { k: 'size', label: 'No canvas size', has: (p) => !p.width_in || !p.height_in },
+  { k: 'pics', label: 'Small pictures', has: (p) => !!p.pics_small }
 ];
 
 /** The shops she actually owns kits from — not every shop the app knows. */
@@ -2539,6 +2540,13 @@ route(/^#\/settings$/, async () => {
     api('/state'), api('/stats'), api('/projects/backfill-dates').catch(() => ({ candidates: 0 })),
     api('/projects/upgrade-covers').catch(() => ({ candidates: 0 }))]);
   const synced = state.catalogue.syncedAt ? dateText(state.catalogue.syncedAt.slice(0, 10)) : null;
+  /* A fetch already under way when this screen is painted — because it started
+     on launch, or because the screen was painted again — is picked back up
+     rather than looking like nothing is happening. */
+  if (soft.running) setTimeout(() => {
+    const box = document.getElementById('hifibox');
+    if (box) runJob(soft.running, box, () => render());
+  }, 0);
   setTimeout(() => {
     const r = document.getElementById('restore');
     if (!r) return;
@@ -2704,21 +2712,29 @@ route(/^#\/settings$/, async () => {
                     data-act="backfilldates">Use the day added</button>
           </div>
         </div>` : ''}
-        ${soft.candidates ? `
+        ${soft.total ? `
         <div class="panel pad-in" style="margin-bottom:10px">
           <div class="row" style="align-items:flex-start">
             <span class="k" style="flex:1 1 auto;color:var(--ink)">
-              <span style="display:block;font-weight:600">${num(soft.candidates)} project${
-                soft.candidates === 1 ? '' : 's'} still on thumbnail pictures</span>
-              <span style="display:block;margin-top:3px;font-size:12px;color:var(--ink-mute)">
-                They were saved when covers were fetched small. Fetching them again at full
-                width needs a connection, and replaces the pictures in place.</span>
+              <span style="display:block;font-weight:600">${num(soft.done)} of ${num(soft.total)} kit${
+                soft.total === 1 ? '' : 's'} have full-size pictures</span>
+              <span style="display:block;margin-top:3px;font-size:12px;color:var(--ink-mute)">${
+                soft.candidates
+                  ? 'The rest were saved when pictures were fetched small. Fetching them again '
+                    + 'needs a connection, and replaces them in place — about 1 MB a picture.'
+                  : 'Every kit has the pictures the shop published.'}</span>
             </span>
           </div>
-          <div style="padding:4px 0 8px">
-            <button class="btn ghost wide" style="height:40px;font-size:13px"
-                    data-act="upgradecovers">Get the full-size pictures</button>
-          </div>
+          <div class="progressline" style="margin:4px 0 2px"><i style="width:${
+            soft.total ? Math.round(soft.done / soft.total * 100) : 0}%"></i></div>
+          ${soft.candidates ? `
+          <div style="display:flex;gap:8px;padding:8px 0">
+            <button class="btn ghost" style="flex:1 1 auto;height:40px;font-size:13px"
+                    data-act="showsmallpics">Show the ${num(soft.candidates)} left</button>
+            <button class="btn ghost" style="flex:1 1 auto;height:40px;font-size:13px"
+                    data-act="upgradecovers"${soft.running ? ' disabled' : ''}>${
+                      soft.running ? 'Fetching…' : 'Get the rest'}</button>
+          </div>` : ''}
           <div id="hifibox"></div>
         </div>` : ''}
         <button class="btn primary wide" data-act="backup">Create a full backup</button>
@@ -2996,19 +3012,22 @@ async function handleClick(e) {
     render();
   }
   else if (act === 'upgradecovers') {
-    const { candidates } = await api('/projects/upgrade-covers');
-    if (!candidates) { toast('Every picture is already full size'); render(); return; }
     el.disabled = true;
     const box = document.getElementById('hifibox');
-    if (box) box.innerHTML = `<p style="margin:2px 0 8px;font-size:12px;color:var(--ink-mute)">Fetching ${
-      num(candidates)} project${candidates === 1 ? '' : 's'}…</p>`;
     try {
-      const { upgraded } = await api('/projects/upgrade-covers', { method: 'POST' });
-      toast(upgraded ? `${upgraded} project${upgraded === 1 ? '' : 's'} now full size`
-                     : 'Could not reach the shops');
-    } catch (e) { toast(e.message); }
-    el.disabled = false;
-    render();
+      const { job } = await api('/projects/upgrade-covers?job=1', { method: 'POST' });
+      if (box && job) runJob(job, box, (j) => {
+        const n = (j.result || {}).upgraded || 0;
+        toast(n ? `${n} kit${n === 1 ? '' : 's'} now full size` : 'Could not reach the shops');
+        render();
+      });
+    } catch (e) { toast(e.message); el.disabled = false; }
+  }
+  else if (act === 'showsmallpics') {
+    S.lb = { ...S.lb, gaps: 'pics', open: true };
+    S.filter = 'all'; S.q = '';
+    forgetScroll('#/');
+    go('#/');
   }
   else if (act === 'shownodates') {
     S.lb = { ...S.lb, gaps: 'dates', open: true };
@@ -3451,10 +3470,17 @@ async function catchUpCovers() {
     const { candidates } = await api('/projects/upgrade-covers');
     if (!candidates) return;
     toast(`Fetching full-size pictures · ${candidates} kit${candidates === 1 ? '' : 's'}`);
-    const { upgraded } = await api('/projects/upgrade-covers', { method: 'POST' });
-    if (!upgraded) return;
-    toast(`${upgraded} kit${upgraded === 1 ? '' : 's'} now full size`);
-    render();
+    /* Started as a job so Settings can show how far it has got, and pick it back
+       up if you go and look while it is still running. */
+    const { job } = await api('/projects/upgrade-covers?job=1', { method: 'POST' });
+    if (!job) return;
+    for (;;) {
+      const j = await api('/jobs/' + job);
+      if (j.state === 'running') { await new Promise((r) => setTimeout(r, 700)); continue; }
+      const n = (j.result || {}).upgraded || 0;
+      if (n) { toast(`${n} kit${n === 1 ? '' : 's'} now full size`); render(); }
+      return;
+    }
   } catch { /* no connection: the next launch tries again */ }
 }
 

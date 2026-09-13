@@ -133,6 +133,18 @@ async function listingImages(shopId, handle) {
   return live;
 }
 
+/* Shopify serves a picture at whatever width you ask for, and asking for one at
+   all was the only thing making these soft. These are canvases you zoom into to
+   count drills, so the answer is the original: null means send no width and take
+   the picture as published. A whole logbook of them is about 0.4 GB, which is
+   less than a phone spends on a weekend of photographs.
+
+   COVER_FIDELITY is the level a project's pictures were fetched at, not a flag,
+   so that raising it catches up everything fetched under the old one. 1 was the
+   1600px pass; 2 is the original. */
+const COVER_WIDTH = null;
+const COVER_FIDELITY = 2;
+
 async function listingCovers(row, force = false) {
   if (!row.dac_handle) return [];
   const urls = await listingImages(row.shop || 'dac', row.dac_handle);
@@ -144,14 +156,14 @@ async function listingCovers(row, force = false) {
    whatever is already there. Filenames do not change, so nothing that points at
    them has to be rewritten. Returns true if the pictures were replaced. */
 async function hifiCovers(row) {
-  if (!row.dac_handle || row.cover_hifi) return false;
+  if (!needsHifi(row)) return false;
   const g = await listingCovers(row, true);
   if (!g.length) return false;
   const own = isOwnCover(row.cover) ? [row.cover] : [];
   const all = [...own, ...g];
   row.cover = all[0];
   row.covers = all.length > 1 ? JSON.stringify(all) : null;
-  row.cover_hifi = 1;
+  row.cover_hifi = COVER_FIDELITY;
   return true;
 }
 
@@ -170,7 +182,7 @@ export async function upgradeCovers(onProgress) {
   return done;
 }
 
-const needsHifi = (r) => !!r && !!r.dac_handle && !r.cover_hifi;
+const needsHifi = (r) => !!r && !!r.dac_handle && (Number(r.cover_hifi) || 0) < COVER_FIDELITY;
 
 /* Fill in the blanks on projects you own, from the shops that publish more on
    their product page than in their feed. One request per project that is still
@@ -456,13 +468,6 @@ export async function saveFile(path, blobOrBuffer) {
   return n.save(path, toBase64(buf));
 }
 
-/* Shopify serves a picture at whatever width you ask for, so asking for 600 was
-   the only thing making these soft — fine as a grid thumbnail, and a blur the
-   moment you open the canvas you are about to spend eighty hours on. 1600 is
-   sharp full-screen on a phone without turning a seventy-kit logbook into a
-   gigabyte of photographs. */
-const COVER_WIDTH = 1600;
-
 /** Download a whole listing gallery; returns the local filenames. */
 async function cacheGallery(key, urls, width = COVER_WIDTH, force = false) {
   const out = [];
@@ -478,7 +483,8 @@ async function cacheCover(key, url, width = COVER_WIDTH, force = false) {
   let src = url;
   try {
     const u = new URL(url);
-    if (u.hostname.includes('shopify')) { u.searchParams.set('width', String(width)); src = u.toString(); }
+    // no width at all means the original, which is the point
+    if (width && u.hostname.includes('shopify')) { u.searchParams.set('width', String(width)); src = u.toString(); }
   } catch {}
   const ext = (String(url).match(/\.(png|webp|gif|jpe?g)/i) || ['.jpg'])[0].toLowerCase();
   const name = key + (ext === '.jpeg' ? '.jpg' : ext);
@@ -820,7 +826,7 @@ export async function localApi(path, opts = {}) {
         const g = await cacheGallery(`${body.shop}-${body.dac_handle}`, urls.length ? urls : [c.image]);
         body.cover = g[0] || null;
         if (g.length > 1) body.covers = JSON.stringify(g);
-        if (g.length) body.cover_hifi = 1;
+        if (g.length) body.cover_hifi = COVER_FIDELITY;
       }
     }
     const ts = nowIso();
@@ -873,7 +879,7 @@ export async function localApi(path, opts = {}) {
             const own = isOwnCover(row.cover) ? [row.cover] : [];
             row.cover = own[0] || g[0];
             row.covers = JSON.stringify([...own, ...g]);
-            row.cover_hifi = 1;
+            row.cover_hifi = COVER_FIDELITY;
           }
           await fillFromListing(row);
         } catch { /* covers are cosmetic; never fail a save over them */ }

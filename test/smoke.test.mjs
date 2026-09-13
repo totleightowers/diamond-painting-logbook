@@ -1540,10 +1540,9 @@ test('a cover is fetched at full fidelity, not a thumbnail', async () => {
 
   const shots = m.net.filter((u) => /\.(jpg|jpeg|png|webp)/i.test(u));
   assert.ok(shots.length, 'adding a kit fetched no pictures at all');
-  for (const u of shots) {
-    const w = Number(new URL(u).searchParams.get('width'));
-    assert.ok(w >= 1600, `a cover was fetched at width=${w || '(none)'}, which is a thumbnail`);
-  }
+  for (const u of shots)
+    assert.equal(new URL(u).searchParams.get('width'), null,
+                 'a cover was fetched at a asked-for width, so it is not the original');
 });
 
 /* The pictures already on disk were fetched small, and the filename does not
@@ -1570,7 +1569,7 @@ test('kits cached before full fidelity can be upgraded in place', async () => {
   const shots = m.net.filter((u) => /\.(jpg|jpeg|png|webp)/i.test(u));
   assert.ok(shots.length, 'the upgrade re-fetched nothing — the on-disk check still short-circuits');
   for (const u of shots)
-    assert.ok(Number(new URL(u).searchParams.get('width')) >= 1600, 'refetched at thumbnail width');
+    assert.equal(new URL(u).searchParams.get('width'), null, 'refetched at a reduced width');
 
   // and it does not keep offering to do work it has already done
   assert.equal((await m.api('/projects/upgrade-covers')).candidates, 0,
@@ -1692,6 +1691,27 @@ test('kits still on thumbnails are caught up on launch, without being asked', as
   const shots = next.net.filter((u) => /\.(jpg|jpeg|png|webp)/i.test(u));
   assert.ok(shots.length, 'launching fetched no pictures at all');
   for (const u of shots)
-    assert.ok(Number(new URL(u).searchParams.get('width')) >= 1600,
-              'launch refetched at thumbnail width');
+    assert.equal(new URL(u).searchParams.get('width'), null, 'launch refetched at a reduced width');
+});
+
+/* Covers were fetched at 1600 before they were fetched at full size, and those
+   kits were marked done. A mark that only says "done" cannot tell the two
+   apart, so they would have kept the smaller picture for ever. */
+test('kits upgraded to the old 1600px size are caught up again on launch', async () => {
+  const first = await mount();
+  await first.sync();
+  await emptyLogbook(first);
+  const cat = await first.api('/catalogue/search?q=moon');
+  const made = await first.api('/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: cat[0].title, shop: cat[0].shop, dac_handle: cat[0].handle }) });
+  // exactly how a version that fetched 1600px left it
+  await first.api('/projects/' + made.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cover_hifi: 1 }) });
+
+  assert.equal((await first.api('/projects/upgrade-covers')).candidates, 1,
+               'a kit stuck at 1600px was treated as already done');
+
+  const next = await mount();
+  await next.settle(); await next.settle();
+  assert.equal((await next.api('/projects/upgrade-covers')).candidates, 0, 'launch did not catch it up');
 });

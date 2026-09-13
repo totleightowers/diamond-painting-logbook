@@ -177,7 +177,7 @@ export async function upgradeCovers(onProgress) {
     if (!needsHifi(row)) continue;
     if (!await hifiCovers(row)) continue;
     row.updated_at = nowIso();
-    await idb.put('projects', row); done++; onProgress?.(done);
+    await idb.put('projects', row); done++; onProgress?.(done, row.title);
   }
   return done;
 }
@@ -811,7 +811,10 @@ export async function localApi(path, opts = {}) {
       size: (a, b) => ((b.width_in || 0) * (b.height_in || 0)) - ((a.width_in || 0) * (a.height_in || 0)),
       progress: (a, b) => (b.progress || 0) - (a.progress || 0)
     }[sort] || ((a, b) => b.id - a.id);
-    return rows.sort(cmp);
+    /* Whether a kit's pictures are the small ones is a storage question, and the
+       answer rather than the fidelity number is what the logbook needs — so it
+       travels with the row and nothing outside has to know what level we are on. */
+    return rows.sort(cmp).map(r => ({ ...r, pics_small: needsHifi(r) }));
   }
 
   if (p === '/projects' && m === 'POST') {
@@ -1473,13 +1476,40 @@ export async function localApi(path, opts = {}) {
 
   /* Pictures fetched before covers went full width. Offered as a count first so
      Settings can stay quiet when there is nothing to catch up on. */
+  /* Worked out from the projects themselves rather than from a box on one
+     screen, so it is the same answer on any screen and after any reload — and
+     it can say which kits are still waiting, not just how many. */
   if (p === '/projects/upgrade-covers' && m === 'GET') {
-    const rows = await projects();
-    return { candidates: rows.filter(needsHifi).length };
+    const rows = (await projects()).filter(r => !!r.dac_handle);
+    const pending = rows.filter(needsHifi);
+    return {
+      total: rows.length,
+      done: rows.length - pending.length,
+      candidates: pending.length,
+      pending: pending.map(r => ({ id: r.id, title: r.title })),
+      running: [...jobs.values()].find(j => j.kind === 'covers' && j.state === 'running')?.id || null
+    };
   }
 
   if (p === '/projects/upgrade-covers' && m === 'POST') {
-    return { upgraded: await upgradeCovers() };
+    /* Two runs at once would fetch everything twice, so a second ask joins the
+       one already going rather than starting another. */
+    const live = [...jobs.values()].find(j => j.kind === 'covers' && j.state === 'running');
+    if (live) return { job: live.id };
+    if (!q(url, 'job')) return { upgraded: await upgradeCovers() };
+
+    const job = newJob('covers-' + Date.now());
+    job.kind = 'covers';
+    const rows = (await projects()).filter(needsHifi);
+    job.total = rows.length;
+    (async () => {
+      try {
+        await upgradeCovers((n, title) => { job.done = n; job.message = title || ''; });
+        job.result = { upgraded: job.done };
+        job.state = 'done';
+      } catch (e) { job.error = e.message; job.state = 'error'; }
+    })();
+    return { job: job.id };
   }
 
   if (p === '/stats') {

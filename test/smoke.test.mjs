@@ -1608,7 +1608,14 @@ test('the offer to get full-size pictures is in Settings, under Your data', asyn
   assert.ok(m.find('[data-act="upgradecovers"]'), 'Settings never offers to fetch the full-size pictures');
 
   await m.tap('[data-act="upgradecovers"]');
+  // the button starts a job now, so wait for it the way the screen does
+  for (let i = 0; i < 400; i++) {
+    if (!(await m.api('/projects/upgrade-covers')).candidates) break;
+    await new Promise((r) => setTimeout(r, 5));
+  }
   assert.equal((await m.api('/projects/upgrade-covers')).candidates, 0, 'the button did not do it');
+
+  await m.go('#/settings');
   assert.equal(m.find('[data-act="upgradecovers"]'), null,
                'the offer outlived the thing it was offering to fix');
 });
@@ -1714,4 +1721,91 @@ test('kits upgraded to the old 1600px size are caught up again on launch', async
   const next = await mount();
   await next.settle(); await next.settle();
   assert.equal((await next.api('/projects/upgrade-covers')).candidates, 0, 'launch did not catch it up');
+});
+
+/* The Settings panel said only how many were left, in a box it rewrote itself,
+   with nothing on screen once the page was painted again — so there was no way
+   to tell what had been done, what was left, or whether anything was happening. */
+test('the picture upgrade reports what is done, not only what is left', async () => {
+  const m = await mount();
+  await m.sync();
+  await emptyLogbook(m);
+  const cat = await m.api('/catalogue/search?q=moon');
+  const made = await m.api('/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: cat[0].title, shop: cat[0].shop, dac_handle: cat[0].handle }) });
+  await m.api('/projects/' + made.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cover_hifi: 0 }) });
+
+  const before = await m.api('/projects/upgrade-covers');
+  assert.equal(before.total, 1, 'it does not say how many kits it is counting');
+  assert.equal(before.done, 0);
+  assert.equal(before.candidates, 1);
+  assert.deepEqual(before.pending.map((p) => p.id), [made.id], 'it cannot name what is left');
+
+  await m.api('/projects/upgrade-covers', { method: 'POST' });
+  const after = await m.api('/projects/upgrade-covers');
+  assert.equal(after.done, 1, 'a finished kit is not counted as done');
+  assert.deepEqual(after.pending, []);
+});
+
+/* A count worked out from a box on one screen dies with that screen. Worked out
+   from the projects themselves it is right on any screen, at any time. */
+test('what is done survives a reload, because it is read off the projects', async () => {
+  const first = await mount();
+  await first.sync();
+  await emptyLogbook(first);
+  const cat = await first.api('/catalogue/search?q=moon');
+  for (const t of [cat[0], cat[1]].filter(Boolean))
+    await first.api('/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: t.title, shop: t.shop, dac_handle: t.handle }) });
+  const all = await first.api('/projects');
+  await first.api('/projects/' + all[0].id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cover_hifi: 0 }) });
+
+  const seen = await first.api('/projects/upgrade-covers');
+  const next = await mount();                       // a reload
+  const again = await next.api('/projects/upgrade-covers');
+  assert.equal(again.total, seen.total, 'the total reset on reload');
+  assert.ok(again.total > 0, 'sanity: there are kits to count');
+});
+
+/* Progress you cannot see is indistinguishable from nothing happening. */
+test('the picture upgrade runs as a job, so its progress can be watched', async () => {
+  const m = await mount();
+  await m.sync();
+  await emptyLogbook(m);
+  const cat = await m.api('/catalogue/search?q=moon');
+  const made = await m.api('/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: cat[0].title, shop: cat[0].shop, dac_handle: cat[0].handle }) });
+  await m.api('/projects/' + made.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cover_hifi: 0 }) });
+
+  const { job } = await m.api('/projects/upgrade-covers?job=1', { method: 'POST' });
+  assert.ok(job, 'the upgrade does not report itself as a job');
+  let j;
+  for (let i = 0; i < 400; i++) {
+    j = await m.api('/jobs/' + job);
+    if (j.state !== 'running') break;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.equal(j.state, 'done', 'the job never finished: ' + (j.error || ''));
+  assert.equal(j.total, 1, 'the job never said how much there was to do');
+  assert.equal(j.done, 1);
+});
+
+/* And the logbook can show you which ones they are. */
+test('the logbook can filter to kits without full-size pictures', async () => {
+  const m = await mount();
+  await m.sync();
+  await emptyLogbook(m);
+  const cat = await m.api('/catalogue/search?q=moon');
+  const made = await m.api('/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: cat[0].title, shop: cat[0].shop, dac_handle: cat[0].handle }) });
+  await m.api('/projects/' + made.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cover_hifi: 0 }) });
+
+  await m.go('#/');
+  await m.tap('[data-act="lbfilters"]');
+  assert.ok(m.find('[data-act="lbgaps"][data-k="pics"]'),
+            'the logbook cannot show which kits are still on small pictures');
 });

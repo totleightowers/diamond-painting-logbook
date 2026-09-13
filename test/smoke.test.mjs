@@ -1809,3 +1809,40 @@ test('the logbook can filter to kits without full-size pictures', async () => {
   assert.ok(m.find('[data-act="lbgaps"][data-k="pics"]'),
             'the logbook cannot show which kits are still on small pictures');
 });
+
+/* Two bars for one thing, and a count painted once that then sat still while
+   the fetch ran — "1 of 128" however many had actually been done. */
+test('the picture panel has one progress line, and a count that is live', async () => {
+  const m = await mount();
+  await m.sync();
+  await emptyLogbook(m);
+  const cat = await m.api('/catalogue/search?q=moon');
+  const made = await m.api('/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: cat[0].title, shop: cat[0].shop, dac_handle: cat[0].handle }) });
+  await m.api('/projects/' + made.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cover_hifi: 0 }) });
+
+  await m.go('#/settings');
+  const panel = m.find('[data-act="upgradecovers"]').closest('.panel');
+  assert.equal(panel.querySelectorAll('.progressline').length, 1,
+               'the picture panel draws more than one progress line');
+  assert.ok(panel.querySelector('#hificount'), 'the count cannot be updated in place');
+  assert.ok(panel.querySelector('#hifibar'), 'the bar cannot be moved in place');
+  assert.match(panel.querySelector('#hificount').textContent, /0 of 1 kit/);
+
+  await m.tap('[data-act="upgradecovers"]');
+  /* The second line used to appear only once the fetch was under way, inside the
+     box the job drew for itself. Scoped to this panel: the diamonds-placed bar
+     further up the screen is a different thing and has every right to be there. */
+  const live = m.find('#hificount').closest('.panel');
+  assert.equal(live.querySelectorAll('.progressline').length, 1,
+               'a second progress line appears while the fetch is running');
+
+  for (let i = 0; i < 400; i++) {
+    if (!(await m.api('/projects/upgrade-covers')).candidates) break;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  await m.settle();
+  await m.go('#/settings');
+  assert.match(m.text(), /1 of 1 kit/, 'the count never caught up with what was done');
+});
